@@ -4,13 +4,15 @@ import { evaluateInstantBankDiscount } from './engines/instantBankDiscount';
 import { evaluateNoCostEmi } from './engines/noCostEmi';
 import { evaluateExchangeDiscount } from './engines/exchangeDiscount';
 import {
-  InstantBankDiscountRequest,
   InstantBankDiscountResult,
-  NoCostEmiRequest,
   NoCostEmiResult,
-  ExchangeDiscountRequest,
   ExchangeDiscountResult,
 } from './types';
+import {
+  validateInstantBankDiscountRequest,
+  validateNoCostEmiRequest,
+  validateExchangeDiscountRequest,
+} from './validation';
 
 /**
  * This Express app plays the role that API Gateway + Lambda would play in
@@ -33,6 +35,21 @@ export function createApp(store: IdempotencyStore = new InMemoryIdempotencyStore
   const app = express();
   app.use(express.json());
 
+  // Malformed JSON bodies make body-parser throw a SyntaxError, which would
+  // otherwise fall through to Express's default HTML error page — wrong
+  // content type for a JSON API, and it leaks a stack trace outside of
+  // NODE_ENV=production.
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({ error: 'Malformed JSON in request body.' });
+    }
+    next(err);
+  });
+
+  app.get('/health', (_req: Request, res: Response) => {
+    res.status(200).json({ status: 'ok' });
+  });
+
   function requireIdempotencyKey(req: Request, res: Response, next: NextFunction) {
     const key = req.header('Idempotency-Key');
     if (!key) {
@@ -43,9 +60,7 @@ export function createApp(store: IdempotencyStore = new InMemoryIdempotencyStore
     next();
   }
 
-  app.use(requireIdempotencyKey);
-
-  app.post('/discounts/instant-bank', async (req: Request, res: Response) => {
+  app.post('/discounts/instant-bank', requireIdempotencyKey, async (req: Request, res: Response) => {
     const key = `instant-bank:${(req as any).idempotencyKey}`;
     const claim = await store.tryClaim<InstantBankDiscountResult>(key);
 
@@ -57,16 +72,17 @@ export function createApp(store: IdempotencyStore = new InMemoryIdempotencyStore
     }
 
     try {
-      const payload = req.body as InstantBankDiscountRequest;
+      const payload = validateInstantBankDiscountRequest(req.body);
       const result = evaluateInstantBankDiscount(payload);
       await store.save(key, result);
       return res.status(200).json({ ...result, replayed: false });
     } catch (err) {
+      await store.release(key);
       return res.status(400).json({ error: (err as Error).message });
     }
   });
 
-  app.post('/discounts/no-cost-emi', async (req: Request, res: Response) => {
+  app.post('/discounts/no-cost-emi', requireIdempotencyKey, async (req: Request, res: Response) => {
     const key = `no-cost-emi:${(req as any).idempotencyKey}`;
     const claim = await store.tryClaim<NoCostEmiResult>(key);
 
@@ -78,16 +94,17 @@ export function createApp(store: IdempotencyStore = new InMemoryIdempotencyStore
     }
 
     try {
-      const payload = req.body as NoCostEmiRequest;
+      const payload = validateNoCostEmiRequest(req.body);
       const result = evaluateNoCostEmi(payload);
       await store.save(key, result);
       return res.status(200).json({ ...result, replayed: false });
     } catch (err) {
+      await store.release(key);
       return res.status(400).json({ error: (err as Error).message });
     }
   });
 
-  app.post('/discounts/exchange', async (req: Request, res: Response) => {
+  app.post('/discounts/exchange', requireIdempotencyKey, async (req: Request, res: Response) => {
     const key = `exchange:${(req as any).idempotencyKey}`;
     const claim = await store.tryClaim<ExchangeDiscountResult>(key);
 
@@ -99,17 +116,14 @@ export function createApp(store: IdempotencyStore = new InMemoryIdempotencyStore
     }
 
     try {
-      const payload = req.body as ExchangeDiscountRequest;
+      const payload = validateExchangeDiscountRequest(req.body);
       const result = evaluateExchangeDiscount(payload);
       await store.save(key, result);
       return res.status(200).json({ ...result, replayed: false });
     } catch (err) {
+      await store.release(key);
       return res.status(400).json({ error: (err as Error).message });
     }
-  });
-
-  app.get('/health', (_req: Request, res: Response) => {
-    res.status(200).json({ status: 'ok' });
   });
 
   return app;

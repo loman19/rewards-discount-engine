@@ -39,6 +39,7 @@ The guarantee this project proves (see `tests/idempotency.test.ts`):
 ```
 src/
   types.ts                        # shared request/response shapes
+  validation.ts                    # request-body validation at the API boundary
   idempotency/
     IdempotencyStore.ts            # interface + in-memory impl (swap for DynamoDB in prod)
   engines/
@@ -51,13 +52,15 @@ tests/
   noCostEmi.test.ts
   exchangeDiscount.test.ts
   idempotency.test.ts              # proves the replay-safety guarantee end-to-end
+  idempotencyStore.test.ts         # unit tests on the store itself (in-flight duplicates, release)
+  apiValidation.test.ts            # health check, malformed JSON, input validation, stuck-key regression
 ```
 
 ## Running it
 
 ```bash
 npm install
-npm test          # runs all 19 tests
+npm test          # runs all 29 tests
 npm run build      # compiles to dist/
 npm start          # starts the server on :3000 (after build)
 # or for local dev without a separate build step:
@@ -80,6 +83,33 @@ curl -X POST http://localhost:3000/discounts/instant-bank \
   -d '{"cardBin":"400123","cartValuePaise":2000000}'
 ```
 
+## Bugs found in audit, and fixed
+
+Before adding new features, the existing code was audited by actually running the
+server and probing it (not just reading the source). Four real bugs were found and
+fixed, each with a regression test in `tests/apiValidation.test.ts` or
+`tests/idempotencyStore.test.ts`:
+
+1. **`/health` required an `Idempotency-Key` header.** The header-check middleware
+   was registered globally with `app.use()` before any routes existed, so it applied
+   to `/health` too. In production this would fail ALB/ECS/Lambda health checks (they
+   don't send business headers), getting a healthy service killed by its own
+   orchestrator. Fixed by scoping the middleware to only the three discount routes.
+2. **A failed request permanently locked its idempotency key.** `tryClaim` marked a
+   key `'in-flight'` synchronously, but on validation failure the route handler
+   returned 400 without ever calling `save()` — so the key stayed locked for its
+   full 24h TTL, and a corrected retry with the *same* key got a `409` forever.
+   Fixed by adding `IdempotencyStore.release(key)`, called from every route's catch
+   block.
+3. **No input validation at the API boundary.** Missing fields silently produced
+   `null`/`NaN` fields in a `200` response instead of a `400`; a negative `ageMonths`
+   produced an exchange-discount value *higher* than the device's original price.
+   Fixed with `src/validation.ts` — explicit presence/type/range checks per request
+   shape, run before any engine executes.
+4. **Malformed JSON returned an HTML stack-trace page.** body-parser's JSON error
+   fell through to Express's default HTML error handler. Fixed with a JSON-specific
+   error-handling middleware right after `express.json()`.
+
 ## Deliberate scope decisions
 
 This build intentionally covers the **core engine + idempotency** only — not yet:
@@ -91,6 +121,9 @@ This build intentionally covers the **core engine + idempotency** only — not y
   order level)
 - AWS SAM/CDK infrastructure-as-code for actual Lambda deployment
 - Load testing to produce real p99 latency numbers
+- Schema-based validation (zod or similar) — `src/validation.ts` is hand-rolled and
+  closes the specific gaps found in the audit; a schema library would be a cleaner
+  long-term replacement
 
 These are good "what would you build next" answers in an interview, and a good todo
 list for iterating with Claude Code from here.
@@ -107,3 +140,8 @@ list for iterating with Claude Code from here.
   at effectively unlimited scale.
 - **"What would you build next?"** → the campaign-level budget tracker (see above) —
   this is where the "economic model" the JD asks for actually lives.
+- **"Tell me about a bug you found"** → the stuck-idempotency-key bug (see above): a
+  failed request left a key permanently claimed because the error path never called
+  `save()` or released the claim. Found by actually running the server and retrying
+  a corrected request, not by reading the code — a reminder that idempotency logic
+  needs to be tested on its failure paths, not just its happy path.

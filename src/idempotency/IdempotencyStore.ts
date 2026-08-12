@@ -31,6 +31,15 @@ export interface IdempotencyStore {
   tryClaim<T>(key: string): Promise<{ claimed: true } | { claimed: false; existing: StoredResult<T> | null }>;
 
   save<T>(key: string, result: T): Promise<void>;
+
+  /**
+   * Releases a claimed key without saving a result, so a subsequent request
+   * with the same key can claim it again. Callers must invoke this if they
+   * claimed a key but failed before calling `save` (e.g. request validation
+   * failed) — otherwise the key is stuck 'in-flight' until its TTL expires,
+   * and a corrected retry can never succeed.
+   */
+  release(key: string): Promise<void>;
 }
 
 interface InternalRecord {
@@ -73,6 +82,10 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
 
   async save<T>(key: string, result: T): Promise<void> {
     this.records.set(key, { status: 'complete', result, storedAtMs: Date.now() });
+  }
+
+  async release(key: string): Promise<void> {
+    this.records.delete(key);
   }
 
   /** Test/debug helper only. */
