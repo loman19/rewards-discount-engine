@@ -4,3 +4,4 @@ dist/
 .DS_Store
 coverage/
 CLAUDE_CODE_PROMPT.md
+CLAUDE.md

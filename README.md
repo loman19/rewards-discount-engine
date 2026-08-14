@@ -3,19 +3,19 @@
 A serverless-style rewards-eligibility engine implementing three customer-facing
 discount mechanisms, built with idempotent, replay-safe request handling.
 
-Built as a targeted portfolio project for the **Amazon Pay India — Rewards Team**
-role (Software Dev Engineer I, Job ID 10470829). Every design decision below maps
-directly to a phrase in that JD.
+Built as a portfolio project demonstrating backend patterns common to e-commerce
+checkout discount systems — bank-offer eligibility, no-cost EMI, and device trade-in
+valuation — with an emphasis on correctness under retries and duplicate delivery.
 
-## Why this project, mapped to the JD
+## Design goals
 
-| JD language | What's implemented here |
+| Goal | What's implemented here |
 |---|---|
-| "Instant Bank Discount, No Cost EMI, and Exchange Discount" | Three standalone engines, one per feature: `src/engines/instantBankDiscount.ts`, `noCostEmi.ts`, `exchangeDiscount.ts` |
-| "highly scalable, low latency mobile first products" | Stateless pure-function engines behind thin HTTP handlers — the same shape as an API Gateway → Lambda integration. No engine touches global state; latency is dominated only by the idempotency store lookup. |
-| "mathematical, economic and gamification models to engage customers in an economically sustainable way" | `noCostEmi.ts` computes the *true* reducing-balance EMI vs. the *displayed* zero-interest EMI, and flags a `sustainable: false` per-order guard when the platform's interest subsidy exceeds a configured cap — i.e. the system knows when it's about to lose money on a promotion, not just how to display one. |
-| "Lambda, ECS, ... SQS, DynamoDB" | `IdempotencyStore` is written as an interface (`src/idempotency/IdempotencyStore.ts`) with an in-memory implementation for local dev. It's designed to be a drop-in swap for a DynamoDB-backed store (`PutItem` with `attribute_not_exists(PK)` + TTL attribute) with zero changes to route or business logic. |
-| "Operational Excellence — monitoring & operation of production services" | Every discount decision returns a `replayed: boolean` flag, making duplicate-vs-fresh processing observable at the API layer — the kind of signal you'd wire into a CloudWatch metric in production. |
+| Three independent discount mechanisms | Standalone engines, one per feature: `src/engines/instantBankDiscount.ts`, `noCostEmi.ts`, `exchangeDiscount.ts` |
+| Scalable, low-latency, stateless design | Stateless pure-function engines behind thin HTTP handlers — the same shape as an API Gateway → Lambda integration. No engine touches global state; latency is dominated only by the idempotency store lookup. |
+| Economically sustainable promotions | `noCostEmi.ts` computes the *true* reducing-balance EMI vs. the *displayed* zero-interest EMI, and flags a `sustainable: false` per-order guard when the platform's interest subsidy exceeds a configured cap — i.e. the system knows when it's about to lose money on a promotion, not just how to display one. |
+| Cloud-portable persistence | `IdempotencyStore` is written as an interface (`src/idempotency/IdempotencyStore.ts`) with an in-memory implementation for local dev. It's designed to be a drop-in swap for a DynamoDB-backed store (`PutItem` with `attribute_not_exists(PK)` + TTL attribute) with zero changes to route or business logic. |
+| Observability | Every discount decision returns a `replayed: boolean` flag, making duplicate-vs-fresh processing observable at the API layer — the kind of signal you'd wire into a monitoring dashboard in production. |
 
 ## The idempotency pattern (the differentiator)
 
@@ -116,9 +116,8 @@ This build intentionally covers the **core engine + idempotency** only — not y
 - A real DynamoDB adapter (interface is ready; swap is mechanical, not a redesign)
 - A cross-request promotional budget tracker (currently each No-Cost-EMI check
   only guards its own order; a shared "campaign budget" that throttles/degrades
-  as it depletes is the natural next iteration — this is what the JD's "economically
-  sustainable" phrase is really pointing at, at the campaign level rather than the
-  order level)
+  as it depletes is the natural next iteration — economic sustainability at the
+  campaign level rather than just the order level)
 - AWS SAM/CDK infrastructure-as-code for actual Lambda deployment
 - Load testing to produce real p99 latency numbers
 - Schema-based validation (zod or similar) — `src/validation.ts` is hand-rolled and
@@ -139,7 +138,7 @@ list for iterating with Claude Code from here.
   in-memory map) is the real answer — single-digit-millisecond conditional writes
   at effectively unlimited scale.
 - **"What would you build next?"** → the campaign-level budget tracker (see above) —
-  this is where the "economic model" the JD asks for actually lives.
+  this is where the real economic-sustainability model actually lives.
 - **"Tell me about a bug you found"** → the stuck-idempotency-key bug (see above): a
   failed request left a key permanently claimed because the error path never called
   `save()` or released the claim. Found by actually running the server and retrying
