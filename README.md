@@ -14,7 +14,7 @@ valuation — with an emphasis on correctness under retries and duplicate delive
 | Three independent discount mechanisms | Standalone engines, one per feature: `src/engines/instantBankDiscount.ts`, `noCostEmi.ts`, `exchangeDiscount.ts` |
 | Scalable, low-latency, stateless design | Stateless pure-function engines behind thin HTTP handlers — the same shape as an API Gateway → Lambda integration. No engine touches global state; latency is dominated only by the idempotency store lookup. |
 | Economically sustainable promotions | `noCostEmi.ts` computes the *true* reducing-balance EMI vs. the *displayed* zero-interest EMI, and flags a `sustainable: false` per-order guard when the platform's interest subsidy exceeds a configured cap — i.e. the system knows when it's about to lose money on a promotion, not just how to display one. |
-| Cloud-portable persistence | `IdempotencyStore` is written as an interface (`src/idempotency/IdempotencyStore.ts`) with an in-memory implementation for local dev. It's designed to be a drop-in swap for a DynamoDB-backed store (`PutItem` with `attribute_not_exists(PK)` + TTL attribute) with zero changes to route or business logic. |
+| Cloud-portable persistence | `IdempotencyStore` is an interface (`src/idempotency/IdempotencyStore.ts`) with two implementations: `InMemoryIdempotencyStore` for local dev, and `DynamoDbIdempotencyStore` (`PutItem` with `attribute_not_exists(idempotencyKey) OR expiresAt < :now` + a TTL attribute) for real deployment — zero changes to route or business logic either way. |
 | Observability | Every discount decision returns a `replayed: boolean` flag, making duplicate-vs-fresh processing observable at the API layer — the kind of signal you'd wire into a monitoring dashboard in production. |
 
 ## The idempotency pattern (the differentiator)
@@ -41,26 +41,31 @@ src/
   types.ts                        # shared request/response shapes
   validation.ts                    # request-body validation at the API boundary
   idempotency/
-    IdempotencyStore.ts            # interface + in-memory impl (swap for DynamoDB in prod)
+    IdempotencyStore.ts            # interface + in-memory impl (local dev)
+    DynamoDbIdempotencyStore.ts    # real DynamoDB-backed impl (production/deploy)
   engines/
     instantBankDiscount.ts         # BIN-based bank offer eligibility + capped discount
     noCostEmi.ts                   # true-EMI vs displayed-EMI, interest subsidy calc
     exchangeDiscount.ts            # depreciation-curve trade-in valuation
   app.ts                           # Express routes wiring engines behind idempotency
+  lambda.ts                        # Lambda handler — wraps app.ts with serverless-http
 tests/
   instantBankDiscount.test.ts
   noCostEmi.test.ts
   exchangeDiscount.test.ts
   idempotency.test.ts              # proves the replay-safety guarantee end-to-end
-  idempotencyStore.test.ts         # unit tests on the store itself (in-flight duplicates, release)
+  idempotencyStore.test.ts         # unit tests on the in-memory store (in-flight duplicates, release)
+  dynamoDbIdempotencyStore.test.ts # unit tests on the DynamoDB store, against a mocked SDK client
   apiValidation.test.ts            # health check, malformed JSON, input validation, stuck-key regression
+template.yaml                      # AWS SAM: Lambda + HTTP API + DynamoDB table
+DEPLOY.md                          # how to deploy to real AWS and tear it back down
 ```
 
 ## Running it
 
 ```bash
 npm install
-npm test          # runs all 29 tests
+npm test          # runs all 36 tests
 npm run build      # compiles to dist/
 npm start          # starts the server on :3000 (after build)
 # or for local dev without a separate build step:
@@ -110,15 +115,22 @@ fixed, each with a regression test in `tests/apiValidation.test.ts` or
    fell through to Express's default HTML error handler. Fixed with a JSON-specific
    error-handling middleware right after `express.json()`.
 
+## Deploying to real AWS
+
+`DynamoDbIdempotencyStore`, `src/lambda.ts`, and `template.yaml` (AWS SAM) deploy
+this to an actual Lambda function behind an API Gateway HTTP API, backed by a real
+DynamoDB table — see `DEPLOY.md` for the deploy/smoke-test/teardown steps. It's
+meant to be brought up briefly to prove it runs on real infrastructure, then torn
+down with `sam delete` rather than left running as a long-lived service.
+
 ## Deliberate scope decisions
 
-This build intentionally covers the **core engine + idempotency** only — not yet:
-- A real DynamoDB adapter (interface is ready; swap is mechanical, not a redesign)
+This build covers the **core engine + idempotency, including a real AWS deployment
+path** — not yet:
 - A cross-request promotional budget tracker (currently each No-Cost-EMI check
   only guards its own order; a shared "campaign budget" that throttles/degrades
   as it depletes is the natural next iteration — economic sustainability at the
   campaign level rather than just the order level)
-- AWS SAM/CDK infrastructure-as-code for actual Lambda deployment
 - Load testing to produce real p99 latency numbers
 - Schema-based validation (zod or similar) — `src/validation.ts` is hand-rolled and
   closes the specific gaps found in the audit; a schema library would be a cleaner
